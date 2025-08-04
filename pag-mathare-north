@@ -1,0 +1,5 @@
+git init
+git remote add origin https://github.com/Wotienoburu45/pag-mathare-north.git
+git add .
+git commit -m "Initial project scaffold for PAG Mathare North Assembly"
+git push -u origin main
