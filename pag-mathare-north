@@ -1,5 +1,319 @@
-git init
-git remote add origin https://github.com/Wotienoburu45/pag-mathare-north.git
-git add .
-git commit -m "Initial project scaffold for PAG Mathare North Assembly"
-git push -u origin main
+// PAG Mathare North Assembly single-file full-stack app with Excel export
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const ExcelJS = require("exceljs");
+
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/pag-mathare-north";
+const PORT = process.env.PORT || 3000;
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// ----- MongoDB Models -----
+const memberSchema = new mongoose.Schema({
+  name: String,
+  group: Number, // 1..8
+  status: { type: String, enum: ["active", "irregular", "inactive"], default: "inactive" },
+  lastParticipation: Date
+});
+const Member = mongoose.model("Member", memberSchema);
+
+const groupSchema = new mongoose.Schema({
+  name: String,
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: "Member" }]
+});
+const Group = mongoose.model("Group", groupSchema);
+
+const projectSchema = new mongoose.Schema({
+  name: String,
+  group: Number,
+  summary: String,
+  totalAmount: { type: Number, default: 0 },
+  contributions: [{
+    member: String,
+    amount: Number,
+    date: Date
+  }]
+});
+const Project = mongoose.model("Project", projectSchema);
+
+const dormantSchema = new mongoose.Schema({
+  name: String,
+  previousGroup: Number,
+  removedAt: { type: Date, default: Date.now }
+});
+const Dormant = mongoose.model("Dormant", dormantSchema);
+
+// ----- Serve Frontend -----
+app.get("/", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>PAG Mathare North Assembly</title>
+      <style>
+        body { font-family: sans-serif; max-width: 700px; margin: auto; }
+        nav a { margin: 0 10px; }
+        .active { color: green; }
+        .irregular { color: orange; }
+        .inactive { color: gray; }
+        .dormant { color: red; }
+        .export-btn { margin: 12px 0; padding: 6px 12px; background: #1976d2; color: #fff; border: none; cursor: pointer; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <h1>Pentecostal Assemblies of God - Kenya Mathare North Assembly</h1>
+      <nav>
+        <a href="#" onclick="showTab('groups');return false;">Groups</a>
+        <a href="#" onclick="showTab('projects');return false;">Projects</a>
+        <a href="#" onclick="showTab('members');return false;">Members</a>
+        <a href="#" onclick="showTab('dormant');return false;">Dormant</a>
+      </nav>
+      <div>
+        <button class="export-btn" onclick="exportData()">Export All Data to Excel</button>
+      </div>
+      <div id="main"></div>
+      <script>
+        function showTab(tab) {
+          document.getElementById('main').innerHTML = 'Loading...';
+          if (tab === 'groups') loadGroups();
+          if (tab === 'projects') loadProjects();
+          if (tab === 'members') loadMembers();
+          if (tab === 'dormant') loadDormant();
+        }
+
+        function loadGroups() {
+          fetch('/api/groups').then(r=>r.json()).then(groups=>{
+            let html = '<h2>Groups</h2><ul>';
+            groups.forEach(g=>{
+              html += '<li><b>' + g.name + '</b> (' + (g.members||[]).length + ' members)</li>';
+            });
+            html += '</ul><button onclick="initGroups()">Init 8 Groups</button>';
+            document.getElementById('main').innerHTML = html;
+          });
+        }
+        function initGroups() {
+          fetch('/api/init-groups', {method:'POST'}).then(()=>loadGroups());
+        }
+
+        function loadProjects() {
+          fetch('/api/projects').then(r=>r.json()).then(projects=>{
+            let html = '<h2>Projects</h2><ul>';
+            projects.forEach(p=>{
+              html += '<li><b>' + p.name + '</b> (Group '+p.group+') - Total KES ' + (p.totalAmount||0) + '</li>';
+            });
+            html += '</ul><h3>Add Project</h3>';
+            html += '<form onsubmit="return addProject(event)"><input id="pname" placeholder="Project Name" required><input id="pgroup" placeholder="Group #" type="number" min="1" max="8" required><input id="psummary" placeholder="Summary"><button>Add</button></form>';
+            document.getElementById('main').innerHTML = html;
+          });
+        }
+        function addProject(e) {
+          e.preventDefault();
+          const name = document.getElementById('pname').value;
+          const group = +document.getElementById('pgroup').value;
+          const summary = document.getElementById('psummary').value;
+          fetch('/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, group, summary})})
+            .then(()=>loadProjects());
+          return false;
+        }
+
+        function loadMembers() {
+          fetch('/api/members').then(r=>r.json()).then(members=>{
+            let html = '<h2>Members</h2><ul>';
+            members.forEach(m=>{
+              html += '<li>' + m.name + ' (Group ' + m.group + ') <span class="'+m.status+'">'+m.status+'</span></li>';
+            });
+            html += '</ul><h3>Add Member</h3>';
+            html += '<form onsubmit="return addMember(event)"><input id="mname" placeholder="Member Name" required><input id="mgroup" placeholder="Group #" type="number" min="1" max="8" required><button>Add</button></form>';
+            html += '<button onclick="moveDormant()">Move Dormant Members</button>';
+            document.getElementById('main').innerHTML = html;
+          });
+        }
+        function addMember(e) {
+          e.preventDefault();
+          const name = document.getElementById('mname').value;
+          const group = +document.getElementById('mgroup').value;
+          fetch('/api/members', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, group})})
+            .then(()=>loadMembers());
+          return false;
+        }
+        function moveDormant() {
+          fetch('/api/members/move-to-dormant', {method:'POST'}).then(()=>loadMembers());
+        }
+
+        function loadDormant() {
+          fetch('/api/dormant').then(r=>r.json()).then(dm=>{
+            let html = '<h2>Dormant Members <span class="dormant">★</span></h2><ul>';
+            dm.forEach(m=>{
+              html += '<li>' + m.name + ' (from Group ' + m.previousGroup + ')</li>';
+            });
+            html += '</ul>';
+            document.getElementById('main').innerHTML = html;
+          });
+        }
+
+        function exportData() {
+          fetch('/api/export')
+            .then(response => response.blob())
+            .then(blob => {
+              const url = window.URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'pag-mathare-north-export.xlsx';
+              document.body.appendChild(a);
+              a.click();
+              setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+              }, 100);
+            });
+        }
+
+        // Show groups by default
+        showTab('groups');
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// ----- API Endpoints -----
+app.post("/api/init-groups", async (req, res) => {
+  try {
+    let created = [];
+    for (let i = 1; i <= 8; i++) {
+      const name = `Group ${i}`;
+      const exists = await Group.findOne({ name });
+      if (!exists) created.push(await Group.create({ name }));
+    }
+    res.json({ created });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to initialize groups." });
+  }
+});
+
+app.get("/api/groups", async (req, res) => {
+  try {
+    const groups = await Group.find().populate("members");
+    res.json(groups);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch groups." });
+  }
+});
+
+app.post("/api/members", async (req, res) => {
+  try {
+    const { name, group } = req.body;
+    if (!name || !group) return res.status(400).json({ error: "Name and group are required." });
+    const member = new Member({ name, group });
+    await member.save();
+    let grp = await Group.findOne({ name: `Group ${group}` });
+    if (!grp) grp = await Group.create({ name: `Group ${group}` });
+    grp.members.push(member._id);
+    await grp.save();
+    res.json(member);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to add member." });
+  }
+});
+
+app.get("/api/members", async (req, res) => {
+  try {
+    const members = await Member.find();
+    res.json(members);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch members." });
+  }
+});
+
+app.post("/api/members/move-to-dormant", async (req, res) => {
+  try {
+    const threshold = 90 * 24 * 60 * 60 * 1000; // 90 days
+    const now = Date.now();
+    const inactive = await Member.find({ lastParticipation: { $lt: new Date(now - threshold) } });
+    for (let m of inactive) {
+      await Dormant.create({ name: m.name, previousGroup: m.group });
+      await Group.updateOne({ name: `Group ${m.group}` }, { $pull: { members: m._id } });
+      await m.deleteOne();
+    }
+    res.json({ moved: inactive.length });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to move dormant members." });
+  }
+});
+
+app.get("/api/projects", async (req, res) => {
+  try {
+    const projects = await Project.find();
+    res.json(projects);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch projects." });
+  }
+});
+
+app.post("/api/projects", async (req, res) => {
+  try {
+    const { name, group, summary } = req.body;
+    if (!name || !group) return res.status(400).json({ error: "Name and group are required." });
+    const project = new Project({ name, group, summary, totalAmount: 0, contributions: [] });
+    await project.save();
+    res.json(project);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to add project." });
+  }
+});
+
+app.get("/api/dormant", async (req, res) => {
+  try {
+    const dormant = await Dormant.find();
+    res.json(dormant);
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch dormant members." });
+  }
+});
+
+// ----- Export to Excel -----
+app.get("/api/export", async (req, res) => {
+  try {
+    const groups = await Group.find().populate("members").lean();
+    const members = await Member.find().lean();
+    const projects = await Project.find().lean();
+    const dormant = await Dormant.find().lean();
+
+    const wb = new ExcelJS.Workbook();
+
+    // Groups Sheet
+    const wsGroups = wb.addWorksheet("Groups");
+    wsGroups.addRow(["Group Name", "Member Count"]);
+    groups.forEach(g => wsGroups.addRow([g.name, (g.members || []).length]));
+
+    // Members Sheet
+    const wsMembers = wb.addWorksheet("Members");
+    wsMembers.addRow(["Name", "Group", "Status", "Last Participation"]);
+    members.forEach(m => wsMembers.addRow([m.name, m.group, m.status, m.lastParticipation ? new Date(m.lastParticipation).toLocaleString() : ""]));
+
+    // Projects Sheet
+    const wsProjects = wb.addWorksheet("Projects");
+    wsProjects.addRow(["Name", "Group", "Summary", "Total Amount"]);
+    projects.forEach(p => wsProjects.addRow([p.name, p.group, p.summary, p.totalAmount || 0]));
+
+    // Dormant Sheet
+    const wsDormant = wb.addWorksheet("DormantMembers");
+    wsDormant.addRow(["Name", "Previous Group", "Removed At"]);
+    dormant.forEach(d => wsDormant.addRow([d.name, d.previousGroup, d.removedAt ? new Date(d.removedAt).toLocaleString() : ""]));
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename=pag-mathare-north-export.xlsx");
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    res.status(500).json({ error: "Failed to export data to Excel." });
+  }
+});
+
+// ----- Start App -----
+mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => app.listen(PORT, () => console.log('App running at http://localhost:' + PORT)))
+  .catch(err => console.error(err));
